@@ -2,10 +2,10 @@ import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_community.utilities import ArxivAPIWrapper,WikipediaAPIWrapper
 from langchain_community.tools import ArxivQueryRun,WikipediaQueryRun,DuckDuckGoSearchRun
-from langchain.agents import initialize_agent,AgentType
-from langchain.callbacks import StreamlitCallbackHandler
-import os
-from dotenv import load_dotenv
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 ## Arxiv and wikipedia Tools
 arxiv_wrapper=ArxivAPIWrapper(top_k_results=1, doc_content_chars_max=200)
@@ -29,24 +29,40 @@ api_key=st.sidebar.text_input("Enter your Groq API Key:",type="password")
 
 if "messages" not in st.session_state:
     st.session_state["messages"]=[
-        {"role":"assisstant","content":"Hi,I'm a chatbot who can search the web. How can I help you?"}
+        {"role":"assistant","content":"Hi,I'm a chatbot who can search the web. How can I help you?"}
     ]
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg['content'])
 
 if prompt:=st.chat_input(placeholder="What is machine learning?"):
+    chat_history = [
+        HumanMessage(content=msg["content"])
+        if msg["role"] == "user"
+        else AIMessage(content=msg["content"])
+        for msg in st.session_state.messages
+    ]
     st.session_state.messages.append({"role":"user","content":prompt})
     st.chat_message("user").write(prompt)
 
-    llm=ChatGroq(groq_api_key=api_key,model_name="Llama3-8b-8192",streaming=True)
-    tools=[search,arxiv,wiki]
+    if not api_key:
+        st.warning("Enter your Groq API key in the sidebar to start chatting.")
+    else:
+        llm=ChatGroq(groq_api_key=api_key,model_name="openai/gpt-oss-20b",streaming=True)
+        tools=[search,arxiv,wiki]
+        agent_prompt=ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant. Use the search tools when current or sourced information is needed."),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
+        agent=create_tool_calling_agent(llm,tools,agent_prompt)
+        search_agent=AgentExecutor(agent=agent,tools=tools,handle_parsing_errors=True)
 
-    search_agent=initialize_agent(tools,llm,agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,handling_parsing_errors=True)
-
-    with st.chat_message("assistant"):
-        st_cb=StreamlitCallbackHandler(st.container(),expand_new_thoughts=False)
-        response=search_agent.run(st.session_state.messages,callbacks=[st_cb])
-        st.session_state.messages.append({'role':'assistant',"content":response})
-        st.write(response)
+        with st.chat_message("assistant"):
+            st_cb=StreamlitCallbackHandler(st.container(),expand_new_thoughts=False)
+            result=search_agent.invoke({"input":prompt,"chat_history":chat_history},config={"callbacks":[st_cb]})
+            response=result["output"]
+            st.session_state.messages.append({'role':'assistant',"content":response})
+            st.write(response)
 
